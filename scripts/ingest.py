@@ -15,7 +15,7 @@ from pathlib import Path
 # 这里手动加入项目根目录，保证可以导入 src 包。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.kb import ingest
+from src.rag.store import ingest
 
 
 if __name__ == "__main__":

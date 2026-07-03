@@ -35,8 +35,18 @@ LLM_MODEL=qwen-plus
 
 > 说明：项目原有 `.venv` 是 Python 3.14，当前 Chroma/onnxruntime 在该环境下不稳定。
 > 已创建 `.venv311` 作为本项目运行环境。
-> 代码通过 `src.kb` 封装 Chroma 导入，屏蔽默认 ONNX embedding 的初始化；
-> 实际检索使用 `src.embeddings.HashingChineseEmbedding`。
+> 代码通过 `src.rag.store` 封装 Chroma 导入，屏蔽默认 ONNX embedding 的初始化；
+> 实际检索使用 `src.rag.embeddings.HashingChineseEmbedding`。
+
+## 目录结构
+
+```text
+app.py                 FastAPI 入口和内置网页
+scripts/ingest.py      知识库入库脚本
+src/core/              配置模块
+src/agent/             问答编排与频道推荐
+src/rag/               docx 解析、embedding、Chroma 检索
+```
 
 ## API
 

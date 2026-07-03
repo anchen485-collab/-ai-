@@ -1,593 +1,166 @@
 # Python 文件说明
 
-本文档说明当前项目中每个 `.py` 文件的作用、关键函数和它们之间的调用关系。它和 `README.md` 同级，主要用于后续维护、交接和二次开发。
+本文档说明当前项目中每个 `.py` 文件的职责。项目已按模块拆分为 `core`、`agent`、`rag` 三块，避免所有代码堆在 `src` 根目录。
 
-## 项目整体流程
-
-当前项目是一个“全发首页 AI 小助手”的最小可用版本，核心链路如下：
+## 当前目录结构
 
 ```text
-用户浏览器
-  ↓
-app.py 的 FastAPI 接口 /api/chat
-  ↓
-src.agent.answer()
-  ↓
-src.kb.search()
-  ↓
-Chroma 向量库
-  ↓
-返回知识库片段
-  ↓
-src.agent 组织回答
-  ↓
-返回给前端页面
+D:\software\project
+├─ app.py
+├─ scripts
+│  └─ ingest.py
+└─ src
+   ├─ __init__.py
+   ├─ core
+   │  ├─ __init__.py
+   │  └─ config.py
+   ├─ agent
+   │  ├─ __init__.py
+   │  └─ service.py
+   └─ rag
+      ├─ __init__.py
+      ├─ chroma_noop.py
+      ├─ documents.py
+      ├─ embeddings.py
+      └─ store.py
 ```
 
-知识库入库流程如下：
+## 调用链路
+
+问答链路：
 
 ```text
-桌面“知识库”目录下的 docx 文件
+浏览器页面
   ↓
-src.documents.extract_docx_text()
+app.py /api/chat
   ↓
-src.documents.split_text()
+src.agent.service.answer()
   ↓
-src.embeddings.HashingChineseEmbedding
+src.rag.store.search()
   ↓
-src.kb.ingest()
+Chroma
+```
+
+入库链路：
+
+```text
+scripts/ingest.py
   ↓
-写入 data/chroma
+src.rag.store.ingest()
+  ↓
+src.rag.documents.build_chunks()
+  ↓
+src.rag.embeddings.HashingChineseEmbedding
+  ↓
+Chroma data/chroma
 ```
 
 ## app.py
 
-位置：`D:\software\project\app.py`
+FastAPI 服务入口。
 
-这是 FastAPI 服务入口，也是浏览器页面入口。
+它负责：
 
-主要职责：
+- 创建 FastAPI 应用。
+- 提供内置网页 `GET /`。
+- 提供聊天接口 `POST /api/chat`。
+- 提供重建知识库接口 `POST /api/ingest`。
+- 提供健康检查接口 `GET /api/health`。
+- 启动时预热一次知识库检索。
 
-- 创建 FastAPI 应用实例。
-- 提供网页聊天界面。
-- 提供聊天 API。
-- 提供知识库重建 API。
-- 提供健康检查 API。
-- 服务启动时预热一次知识库检索。
+核心导入：
 
-关键对象和函数：
-
-- `app = FastAPI(...)`
-  创建 FastAPI 应用。
-
-- `ChatRequest`
-  Pydantic 请求模型，用来校验 `/api/chat` 的请求体。
-  当前只包含一个字段：
-
-  ```python
-  question: str
-  ```
-
-- `startup()`
-  服务启动时执行。
-  它会调用：
-
-  ```python
-  search("全发平台是什么", k=1)
-  ```
-
-  作用是提前初始化 Chroma 集合，避免第一次用户提问时才初始化。
-
-- `index()`
-  对应接口：
-
-  ```text
-  GET /
-  ```
-
-  返回内置的 `INDEX_HTML` 页面。这个页面是一个简洁聊天界面，不需要额外前端项目。
-
-- `chat(payload: ChatRequest)`
-  对应接口：
-
-  ```text
-  POST /api/chat
-  ```
-
-  调用：
-
-  ```python
-  answer(payload.question)
-  ```
-
-  返回结构包括：
-
-  - `answer`：回答内容
-  - `recommendations`：频道或路径推荐
-  - `sources`：检索来源片段
-
-- `rebuild_knowledge_base()`
-  对应接口：
-
-  ```text
-  POST /api/ingest
-  ```
-
-  调用：
-
-  ```python
-  ingest(reset=True)
-  ```
-
-  用于重新读取知识库 docx 并重建 Chroma 索引。
-
-- `health()`
-  对应接口：
-
-  ```text
-  GET /api/health
-  ```
-
-  返回：
-
-  ```json
-  {"ok": true}
-  ```
-
-- `INDEX_HTML`
-  内嵌的 HTML/CSS/JS 页面。页面内会调用 `/api/chat`，并展示回答、推荐卡片和知识来源。
-
-启动方式：
-
-```powershell
-cd D:\software\project
-.\.venv311\Scripts\uvicorn.exe app:app --host 127.0.0.1 --port 8000
+```python
+from src.agent.service import answer
+from src.rag.store import ingest, search
 ```
+
+也就是说，`app.py` 只负责 HTTP 层，不直接处理文档解析、向量库细节或大模型调用。
 
 ## scripts/ingest.py
 
-位置：`D:\software\project\scripts\ingest.py`
+知识库入库脚本。
 
-这是命令行入库脚本，用来把桌面“知识库”目录里的 docx 文件写入 Chroma。
-
-主要职责：
-
-- 把项目根目录加入 `sys.path`，确保脚本从 `scripts` 目录运行时也能导入 `src` 包。
-- 调用 `src.kb.ingest(reset=True)` 重建知识库。
-- 打印入库结果。
-
-关键逻辑：
-
-```python
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.kb import ingest
-```
-
-这段是为了保证下面命令可以正常运行：
+运行方式：
 
 ```powershell
 .\.venv311\Scripts\python.exe scripts\ingest.py
 ```
 
-主入口：
+它负责：
 
-```python
-if __name__ == "__main__":
-    result = ingest(reset=True)
-    print(result)
-```
+- 把项目根目录加入 `sys.path`。
+- 调用 `src.rag.store.ingest(reset=True)`。
+- 打印入库结果。
 
-成功时会输出类似：
+适用场景：
 
-```text
-{'collection': 'qf_knowledge_base', 'documents': 4, 'chunks': 25, 'path': 'D:\\software\\project\\data\\chroma'}
-```
+- 桌面“知识库”文件夹里的 docx 更新后。
+- 首次克隆项目后需要重新生成本地 Chroma 数据。
 
 ## src/__init__.py
 
-位置：`D:\software\project\src\__init__.py`
+`src` 包标记文件。
 
-这是 Python 包标记文件。
+它没有业务逻辑，只用于让 Python 识别 `src` 为包。
 
-主要职责：
+## src/core/__init__.py
 
-- 让 `src` 目录被 Python 识别为一个包。
-- 支持如下导入方式：
+`core` 模块标记文件。
 
-  ```python
-  from src.agent import answer
-  from src.kb import ingest
-  ```
+当前 `core` 只放项目通用配置。
 
-当前文件内容为空，这是正常的。
+## src/core/config.py
 
-## src/config.py
+项目配置中心。
 
-位置：`D:\software\project\src\config.py`
+它负责：
 
-这是项目配置模块，负责统一读取环境变量和默认配置。
+- 加载项目根目录 `.env`。
+- 读取知识库路径。
+- 读取 Chroma 存储路径。
+- 读取 collection 名称。
+- 读取通义模型名。
+- 读取检索数量和切块参数。
 
-主要职责：
-
-- 读取项目根目录 `.env`。
-- 定义知识库路径、Chroma 存储路径、集合名称、模型名称、检索数量、分块参数等配置。
-- 向其他模块暴露统一的 `settings` 对象。
-
-关键变量：
-
-- `ROOT_DIR`
-  项目根目录：
-
-  ```python
-  D:\software\project
-  ```
-
-- `load_dotenv(ROOT_DIR / ".env")`
-  自动加载 `.env` 文件。
-
-关键函数：
-
-- `_path_from_env(name, default)`
-  从环境变量读取路径。如果环境变量不存在，就使用默认路径。
-
-核心配置类：
-
-- `Settings`
-
-字段说明：
-
-- `kb_source_dir`
-  默认知识库目录：
-
-  ```text
-  C:\Users\Administrator\Desktop\知识库
-  ```
-
-- `chroma_dir`
-  Chroma 持久化目录：
-
-  ```text
-  D:\software\project\data\chroma
-  ```
-
-- `chroma_collection`
-  Chroma 集合名称：
-
-  ```text
-  qf_knowledge_base
-  ```
-
-- `llm_model`
-  调用通义千问时使用的模型，默认：
-
-  ```text
-  qwen-plus
-  ```
-
-- `retrieval_k`
-  每次检索返回的片段数量，默认 5。
-
-- `chunk_size`
-  文档切块大小，默认 650 字符。
-
-- `chunk_overlap`
-  文档切块重叠长度，默认 90 字符。
-
-其他模块通过下面方式使用配置：
+关键对象：
 
 ```python
-from .config import settings
+settings = Settings()
 ```
 
-## src/documents.py
+其他模块都通过 `settings` 获取配置，避免路径和参数散落在各处。
 
-位置：`D:\software\project\src\documents.py`
+默认配置：
 
-这是文档解析和切块模块。
+- 知识库目录：`C:\Users\Administrator\Desktop\知识库`
+- Chroma 目录：`D:\software\project\data\chroma`
+- collection：`qf_knowledge_base`
+- LLM 模型：`qwen-plus`
 
-主要职责：
+## src/agent/__init__.py
 
-- 读取 docx 文件。
-- 从 docx 内部 XML 中提取文本。
-- 将长文本切成适合向量检索的小片段。
-- 为每个片段生成元数据。
+`agent` 模块标记文件。
 
-核心数据结构：
+当前 agent 逻辑集中在 `service.py`。
 
-- `Chunk`
+## src/agent/service.py
 
-```python
-@dataclass(frozen=True)
-class Chunk:
-    id: str
-    text: str
-    metadata: dict[str, str | int]
-```
+问答编排模块。
 
-字段说明：
-
-- `id`：片段唯一 ID。
-- `text`：片段正文。
-- `metadata`：片段来源信息，包括文件名、文件路径、片段编号。
-
-关键函数：
-
-- `extract_docx_text(path: Path) -> str`
-
-  读取 docx 文件正文。
-
-  docx 本质上是一个 zip 包，正文在：
-
-  ```text
-  word/document.xml
-  ```
-
-  函数会从 XML 中提取 `<w:t>` 文本节点，并按段落组织成文本。
-
-- `load_source_documents(source_dir: Path | None = None)`
-
-  读取知识库目录下所有 `.docx` 文件。
-
-  默认目录来自：
-
-  ```python
-  settings.kb_source_dir
-  ```
-
-  如果目录不存在，会抛出：
-
-  ```python
-  FileNotFoundError
-  ```
-
-- `split_text(text, chunk_size=None, overlap=None)`
-
-  将长文本切成多个片段。
-
-  主要切分依据：
-
-  - 句号
-  - 感叹号
-  - 问号
-  - 分号
-  - 换行
-
-  同时保留一定重叠内容，避免上下文被切断。
-
-- `build_chunks(source_dir: Path | None = None)`
-
-  完整构建入库片段。
-
-  调用链路：
-
-  ```text
-  load_source_documents()
-    ↓
-  split_text()
-    ↓
-  Chunk(...)
-  ```
-
-输出会被 `src.kb.ingest()` 使用。
-
-## src/embeddings.py
-
-位置：`D:\software\project\src\embeddings.py`
-
-这是本地 embedding 模块。
-
-主要职责：
-
-- 为 Chroma 提供一个无需外部模型、无需 API Key、无需下载模型的向量化函数。
-- 支持中文文本的基础检索。
-- 避免依赖 Chroma 默认的 ONNX embedding，因为当前机器上的 onnxruntime DLL 初始化不稳定。
-
-核心类：
-
-- `HashingChineseEmbedding`
-
-它是一个轻量级哈希向量 embedding。
-
-实现思路：
-
-1. 清理文本空白。
-2. 提取英文、数字、中文字符。
-3. 生成中文 2-gram、3-gram、4-gram。
-4. 用 `blake2b` 哈希将 token 映射到固定维度向量。
-5. 对向量做归一化。
-
-关键方法：
-
-- `__init__(dimensions=768)`
-  设置向量维度，默认 768。
-
-- `name()`
-  返回 embedding 函数名称，供 Chroma 识别。
-
-- `build_from_config(config)`
-  Chroma 需要的配置恢复方法。
-
-- `get_config()`
-  返回可序列化配置。
-
-- `default_space()`
-  返回向量空间类型：
-
-  ```text
-  cosine
-  ```
-
-- `__call__(input)`
-  Chroma 调用 embedding 函数时会走这里。
-
-- `_embed(text)`
-  把单个字符串变成向量。
-
-- `_tokens(text)`
-  把文本拆成 token，包括中文单字和 n-gram。
-
-注意：
-
-这个 embedding 适合当前一期的静态知识库检索和本地验证。后续如果要提升召回质量，可以替换成更强的中文 embedding 模型，比如 DashScope embedding、bge-m3、text2vec 等。
-
-## src/kb.py
-
-位置：`D:\software\project\src\kb.py`
-
-这是知识库和 Chroma 交互的核心模块。
-
-主要职责：
-
-- 创建或获取 Chroma collection。
-- 将 docx 文档片段写入 Chroma。
-- 根据用户问题检索相关知识片段。
-- 封装 Chroma 的 Windows 兼容处理。
-
-核心数据结构：
-
-- `SearchHit`
-
-```python
-@dataclass(frozen=True)
-class SearchHit:
-    text: str
-    source: str
-    chunk: int
-    distance: float | None = None
-```
-
-字段说明：
-
-- `text`：命中的知识片段正文。
-- `source`：来源 docx 文件名。
-- `chunk`：来源片段编号。
-- `distance`：Chroma 返回的距离值。
-
-关键函数：
-
-- `get_collection()`
-
-  获取 Chroma collection。
-
-  关键配置：
-
-  ```python
-  name=settings.chroma_collection
-  embedding_function=HashingChineseEmbedding()
-  ```
-
-  也就是说，当前项目不使用 Chroma 默认 embedding，而是使用 `HashingChineseEmbedding`。
-
-- `ingest(source_dir=None, reset=True)`
-
-  重建或追加知识库。
-
-  当 `reset=True` 时，会先删除旧 collection，再重新创建。
-
-  调用链路：
-
-  ```text
-  build_chunks()
-    ↓
-  collection.add(...)
-  ```
-
-  返回结果包括：
-
-  - collection 名称
-  - 文档数量
-  - chunk 数量
-  - Chroma 存储路径
-
-- `search(query, k=None)`
-
-  根据问题检索知识库。
-
-  如果 collection 为空，会自动调用：
-
-  ```python
-  ingest(reset=False)
-  ```
-
-  查询后将 Chroma 原始结果转换成 `SearchHit` 列表。
-
-- `_import_chromadb()`
-
-  Chroma 兼容处理函数。
-
-  背景：
-
-  当前项目使用的 Chroma 0.5 会在导入时初始化默认 ONNX embedding；但本机 onnxruntime DLL 初始化存在问题。项目实际不需要默认 ONNX embedding，所以这里提前注入一个很小的 `onnxruntime` stub，让 Chroma 可以正常导入。
-
-  这段兼容逻辑只用于绕开默认 embedding 初始化，实际检索仍然使用 `HashingChineseEmbedding`。
-
-- `_make_client(chromadb)`
-
-  创建 Chroma `PersistentClient`。
-
-  同时关闭匿名遥测，并把 Chroma 的 telemetry 实现切换到 `src.chroma_noop.NoopTelemetry`，避免日志刷屏。
-
-## src/agent.py
-
-位置：`D:\software\project\src\agent.py`
-
-这是问答 Agent 模块。
-
-主要职责：
+它负责：
 
 - 接收用户问题。
-- 调用知识库检索。
-- 根据关键词做简单频道推荐。
-- 如果配置了 `DASHSCOPE_API_KEY`，调用通义千问生成自然语言回答。
-- 如果没有配置 Key 或模型调用失败，返回基于检索片段的兜底回答。
+- 调用 RAG 检索。
+- 尝试调用通义千问生成回答。
+- 没有 API Key 或模型失败时返回检索兜底回答。
+- 根据关键词给出频道推荐卡片。
 
-核心配置：
-
-- `CHANNEL_RULES`
-
-这是一个简单关键词规则表，用于判断应该推荐哪个频道或路径。
-
-当前覆盖：
-
-- 发布与入驻路径
-- 项目需求频道
-- 项目供应频道
-- 法律服务频道
-- 金融供应频道
-- 物流/仓储供需频道
-
-关键函数：
-
-- `detect_recommendations(question)`
-
-  根据关键词匹配推荐卡片。
-
-  例如：
-
-  - 用户问“怎么发布项目需求”
-    推荐：发布与入驻路径
-
-  - 用户问“我想找项目机会”
-    推荐：项目需求频道
-
-  - 用户问“跨境光伏项目怎么找法律服务”
-    推荐：法律服务频道
+主要函数：
 
 - `answer(question)`
 
-  Agent 主入口。
-
-  调用链路：
-
-  ```text
-  search(question)
-    ↓
-  _llm_answer(question, hits)
-    ↓ 如果失败或未配置 Key
-  _fallback_answer(question, hits)
-  ```
-
-  返回结构：
+  Agent 主入口。返回：
 
   ```python
   {
@@ -597,108 +170,152 @@ class SearchHit:
   }
   ```
 
-- `_llm_answer(question, hits)`
+- `recommendations(question)`
 
-  如果环境变量中存在 `DASHSCOPE_API_KEY`，尝试使用：
+  根据关键词匹配频道或操作路径，例如：
 
-  ```python
-  ChatTongyi(model=settings.llm_model)
-  ```
+  - 发布与入驻路径
+  - 项目需求频道
+  - 项目供应频道
+  - 法律服务频道
+  - 金融供应频道
+  - 物流/仓储供需频道
 
-  它会把检索到的知识库片段放进 prompt，要求模型：
+- `llm_answer(question, hits)`
 
-  - 只基于知识库回答
-  - 不编造企业、项目、资质、案例或交易结果
-  - 无依据时明确说明
-  - 给出可操作下一步
+  如果配置了 `DASHSCOPE_API_KEY`，就使用 `ChatTongyi` 生成自然语言回答。
 
-  如果没有 Key、依赖不可用或调用失败，返回 `None`。
+  如果没有 Key 或调用失败，返回 `None`。
 
-- `_fallback_answer(question, hits)`
+- `fallback_answer(question, hits)`
 
-  兜底回答逻辑。
+  不调用大模型，直接把检索到的知识片段和来源整理成回答。
 
-  不调用大模型，直接把检索到的前三个片段整理出来，并附上来源。
+- `compact(text, max_len)`
 
-  这个设计保证了：
+  压缩长片段，避免回答过长。
 
-  - 没有 API Key 也能跑通
-  - Chroma 检索能力可以独立验证
-  - 用户至少能看到知识库依据
+## src/rag/__init__.py
 
-- `_compact(text, max_len)`
+`rag` 模块标记文件。
 
-  压缩长文本片段，避免兜底回答过长。
+RAG 相关代码都放在这个目录。
 
-## src/chroma_noop.py
+## src/rag/documents.py
 
-位置：`D:\software\project\src\chroma_noop.py`
+文档加载和切块模块。
 
-这是 Chroma telemetry 的空实现。
+它负责：
 
-主要职责：
+- 读取 docx 文件。
+- 从 docx 内部 XML 中提取文本。
+- 将长文本切成适合检索的 chunk。
+- 为 chunk 附加来源文件名、来源路径、片段编号。
 
-- 禁用 Chroma 的产品遥测事件发送。
-- 避免本地运行时出现 posthog 相关 warning。
+主要函数：
+
+- `extract_docx_text(path)`
+
+  从 docx 中提取文本。
+
+- `load_documents(source_dir=None)`
+
+  读取知识库目录下全部 `.docx` 文件。
+
+- `split_text(text)`
+
+  按中文标点和换行切块，并保留 overlap。
+
+- `build_chunks(source_dir=None)`
+
+  返回可写入 Chroma 的 `Chunk` 列表。
+
+## src/rag/embeddings.py
+
+本地 embedding 模块。
+
+它负责：
+
+- 把中文文本转换成向量。
+- 避免依赖外部 embedding API。
+- 避免下载模型。
+- 避免使用 Chroma 默认 ONNX embedding。
 
 核心类：
 
-- `NoopTelemetry`
+```python
+HashingChineseEmbedding
+```
 
-继承：
+工作方式：
+
+- 提取中文单字。
+- 提取 2/3/4-gram。
+- 用 hash 映射到固定维度向量。
+- 做向量归一化。
+
+这是一期为了简单稳定采用的方案。后续如果要提升效果，可以替换为专业 embedding 模型。
+
+## src/rag/chroma_noop.py
+
+Chroma 遥测空实现。
+
+它负责：
+
+- 禁用 Chroma 的遥测事件。
+- 避免本地运行时出现无关 posthog warning。
+
+核心类：
 
 ```python
-ProductTelemetryClient
+NoopTelemetry
 ```
 
-核心方法：
+## src/rag/store.py
 
-```python
-def capture(self, event: ProductTelemetryEvent) -> None:
-    return None
-```
+Chroma 向量库访问层。
 
-这个类在 `src.kb._make_client()` 里被使用：
+它是项目中唯一直接操作 Chroma 的模块。
 
-```python
-chroma_product_telemetry_impl="src.chroma_noop.NoopTelemetry"
-```
+它负责：
 
-注意：
+- 创建 Chroma collection。
+- 将知识库 chunk 写入 Chroma。
+- 根据用户问题检索相关 chunk。
+- 绕开 Chroma 默认 ONNX embedding 初始化。
 
-这里的 `@override` 装饰器是必须的，因为 Chroma 依赖的 `overrides` 包会检查子类方法是否显式声明覆盖父类方法。
+主要数据结构：
 
-## 文件之间的依赖关系
+- `SearchHit`
 
-```text
-app.py
-  ├─ src.agent.answer
-  └─ src.kb.ingest / src.kb.search
+字段：
 
-scripts/ingest.py
-  └─ src.kb.ingest
+- `text`：命中的知识片段。
+- `source`：来源 docx 文件名。
+- `chunk`：片段编号。
+- `distance`：Chroma 距离值。
 
-src.agent
-  ├─ src.kb.search
-  └─ src.config.settings
+主要函数：
 
-src.kb
-  ├─ src.config.settings
-  ├─ src.documents.build_chunks
-  ├─ src.embeddings.HashingChineseEmbedding
-  └─ src.chroma_noop.NoopTelemetry
+- `get_collection()`
 
-src.documents
-  └─ src.config.settings
+  获取或创建 Chroma collection。
 
-src.embeddings
-  └─ Python 标准库 hashlib / math / re
+- `ingest(source_dir=None, reset=True)`
 
-src.config
-  └─ .env / 环境变量
-```
+  重建知识库索引。
 
-## 常用运行命令
+- `search(query, k=None)`
+
+  检索相关知识片段。
+
+- `import_chromadb()`
+
+  导入 Chroma 前注入一个很小的 `onnxruntime` stub。
+
+  原因是当前项目不使用 Chroma 默认 ONNX embedding，但 Chroma 0.5 在导入时会初始化它；本机 onnxruntime DLL 不稳定，所以这里屏蔽掉默认初始化。
+
+## 常用命令
 
 重建知识库：
 
@@ -720,48 +337,25 @@ cd D:\software\project
 http://127.0.0.1:8000
 ```
 
-健康检查：
-
-```text
-GET http://127.0.0.1:8000/api/health
-```
-
-聊天接口：
-
-```text
-POST http://127.0.0.1:8000/api/chat
-```
-
-请求体示例：
-
-```json
-{
-  "question": "跨境光伏项目怎么找法律服务？"
-}
-```
-
 ## 当前版本边界
-
-当前版本是一期最小可用版本，重点是静态知识库问答和基础频道推荐。
 
 已经具备：
 
 - FastAPI 服务
-- 简单网页聊天入口
-- docx 知识库读取
-- Chroma 持久化检索
+- 简洁网页入口
+- docx 静态知识库解析
+- Chroma 检索
 - 本地 hashing embedding
 - 通义千问回答增强
 - 无 API Key 兜底回答
-- 简单关键词频道推荐
+- 基础频道推荐
 
 暂未实现：
 
-- 用户登录和权限控制
 - 后台知识库管理页面
-- 图片识别和多模态
-- 真实项目/企业动态数据推荐
-- 复杂多轮状态管理
+- 图片识别
+- 用户登录和权限
+- 动态企业/项目数据推荐
+- 多轮状态管理
 - 埋点统计后台
-- 可配置的运营模板和规则管理
 

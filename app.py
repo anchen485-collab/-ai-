@@ -11,8 +11,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from src.agent import answer
-from src.kb import ingest, search
+from src.agent.service import answer
+from src.rag.store import ingest, search
 
 
 app = FastAPI(title="全发首页 AI 小助手", version="0.1.0")
