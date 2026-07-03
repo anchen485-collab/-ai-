@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""FastAPI 服务入口。
+
+这个文件同时承担两件事：
+1. 对外提供 HTTP API，例如 /api/chat 和 /api/ingest。
+2. 返回一个内置的轻量网页，方便在没有前端工程的情况下直接体验问答。
+"""
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -12,34 +19,48 @@ app = FastAPI(title="全发首页 AI 小助手", version="0.1.0")
 
 
 class ChatRequest(BaseModel):
+    """聊天接口请求体。
+
+    目前一期只需要用户问题，因此只有 question 一个字段。
+    这里用 Pydantic 做长度校验，避免空问题或超长输入直接进入 Agent。
+    """
+
     question: str = Field(min_length=1, max_length=2000)
 
 
 @app.on_event("startup")
 def startup() -> None:
+    # 启动时预热一次知识库，提前创建 Chroma collection。
+    # 这样用户第一次提问时不会承担初始化开销。
     search("全发平台是什么", k=1)
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
+    # 返回内置 HTML 页面。当前项目没有独立前端构建步骤。
     return INDEX_HTML
 
 
 @app.post("/api/chat")
 def chat(payload: ChatRequest) -> dict:
+    # 主聊天接口：把用户问题交给 Agent，Agent 内部会完成检索、生成和推荐。
     return answer(payload.question)
 
 
 @app.post("/api/ingest")
 def rebuild_knowledge_base() -> dict:
+    # 手动重建知识库。适合桌面“知识库”目录里的 docx 更新后调用。
     return ingest(reset=True)
 
 
 @app.get("/api/health")
 def health() -> dict:
+    # 最小健康检查接口，方便确认服务是否启动。
     return {"ok": True}
 
 
+# 一期为了交付简单，把页面直接内嵌在 app.py。
+# 后续如果要做复杂交互，可以把它拆成独立前端项目或 templates/static 目录。
 INDEX_HTML = r"""
 <!doctype html>
 <html lang="zh-CN">
