@@ -1,0 +1,6 @@
+chromadb==0.5.23
+fastapi
+uvicorn
+python-dotenv
+langchain-community
+dashscope
