@@ -10,6 +10,7 @@ from __future__ import annotations
 """Word(docx) 知识库加载与切分：把知识库 docx 转成可向量化的 chunks。"""
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import List
 
@@ -18,6 +19,9 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.core.config import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocxIngestor:
@@ -36,7 +40,7 @@ class DocxIngestor:
             raise FileNotFoundError(f"知识库目录不存在: {root}")
         h = hashlib.md5()
         # sorted 保证文件遍历顺序稳定，否则同样内容会得到不同哈希
-        for path in sorted(root.glob("*.docx")):
+        for path in self._docx_paths(root):
             # 文件名纳入哈希，避免重命名场景被识别为未变更
             h.update(path.name.encode("utf-8"))
             with open(path, "rb") as f:
@@ -56,11 +60,23 @@ class DocxIngestor:
 
         # sorted 保证构建顺序稳定，进而保证后续 chunk ID 可复现
         documents: List[Document] = []
-        for path in sorted(root.glob("*.docx")):
-            documents.extend(self.load(str(path)))
+        for path in self._docx_paths(root):
+            try:
+                documents.extend(self.load(str(path)))
+            except Exception as exc:
+                logger.warning("跳过无法加载的 docx：%s，原因：%s", path, exc)
 
         # 切分成 chunks
         return self.split(documents)
+
+    def _docx_paths(self, root: Path) -> list[Path]:
+        """返回需要处理的 docx，跳过 Word 临时锁文件。"""
+
+        return [
+            path
+            for path in sorted(root.glob("*.docx"))
+            if not path.name.startswith("~$")
+        ]
 
     def load(self, docx_path: str) -> List[Document]:
         """

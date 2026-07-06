@@ -16,13 +16,24 @@ from __future__ import annotations
 """
 
 import os
+import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+if "onnxruntime" not in sys.modules:
+    # Chroma 导入时会初始化默认 ONNX embedding，但本项目实际使用 DashScopeEmbeddings。
+    # 某些 Windows 环境中 onnxruntime DLL 会初始化失败，这里用最小 stub 避免导入阶段崩溃。
+    stub = types.ModuleType("onnxruntime")
+    stub.get_available_providers = lambda: []
+    stub.get_all_providers = lambda: []
+    sys.modules["onnxruntime"] = stub
+
 from langchain_chroma import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
+from chromadb.config import Settings as ChromaSettings
 
 from src.core.config import Settings, settings
 from src.rag.documents import DocxIngestor
@@ -81,6 +92,7 @@ class VectorStoreManager:
             collection_name=collection_name,
             embedding_function=self._embeddings,
             persist_directory=persist_dir,
+            client_settings=ChromaSettings(anonymized_telemetry=False),
             collection_metadata={"hnsw:space": "cosine"},  # 余弦相似度
         )
 

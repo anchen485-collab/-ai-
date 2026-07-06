@@ -8,7 +8,7 @@ import logging
 from dataclasses import asdict
 
 from src.core.config import settings
-from src.rag.store import SearchHit
+from src.rag.embeddings import SearchHit
 from src.tools.rag import run_rag_search
 
 

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from src.agent.deep.service import deep_answer
 from src.agent.service import answer as normal_answer
-from src.rag.store import ingest, search
+from src.rag.embeddings import ingest, search
 
 
 logging.basicConfig(
@@ -51,7 +51,9 @@ def startup() -> None:
         # 知识库目录还没准备好时，不阻塞 Web 服务启动。
         # 前端提问时会返回清晰的配置提示。
         logger.warning("启动预热跳过：知识库目录不存在")
-        pass
+    except Exception as exc:
+        # 知识库构建、在线 embedding 或单个文档异常都不应该阻塞 Web 服务启动。
+        logger.warning("启动预热跳过：%s", exc)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -132,7 +134,7 @@ def split_text(text: str, size: int = 8) -> Iterator[str]:
 @app.post("/api/ingest")
 def rebuild_knowledge_base() -> dict:
     # 手动重建知识库。适合桌面“知识库”目录里的 docx 更新后调用。
-    return ingest(reset=True)
+    return ingest()
 
 
 @app.get("/api/health")

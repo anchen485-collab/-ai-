@@ -9,7 +9,7 @@ from typing import Any
 from src.agent.deep.client import OpenAICompatibleChatClient
 from src.agent.deep.parser import parse_react_output
 from src.agent.deep.prompts import SYSTEM_PROMPT, build_user_prompt
-from src.rag.store import SearchHit
+from src.rag.embeddings import SearchHit
 from src.tools.rag import get_agent_tools, parse_tool_input, serialize_hits
 
 

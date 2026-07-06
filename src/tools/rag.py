@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """RAG 检索工具。
 
-这一层是给 Agent 使用的“工具接口”，底层仍然复用 src.rag.store 中的
+这一层是给 Agent 使用的“工具接口”，底层复用 src.rag.embeddings 中的
 Chroma 检索能力。这样普通 Agent 和深度思考 Agent 都能调用同一套工具。
 """
 
@@ -12,7 +12,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from src.rag.store import SearchHit, search
+from src.rag.embeddings import SearchHit, search
 
 
 logger = logging.getLogger(__name__)
