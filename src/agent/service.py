@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from dataclasses import asdict
 
 from src.core.config import settings
-from src.rag.store import SearchHit, search
+from src.rag.store import SearchHit
+from src.tools.rag import run_rag_search
 
+
+logger = logging.getLogger(__name__)
 
 CHANNEL_RULES = [
     (("入驻", "注册", "加入企业", "发布需求", "发布供应", "发布项目"), "发布与入驻路径",
@@ -26,8 +30,24 @@ CHANNEL_RULES = [
 def answer(question: str) -> dict:
     """Return answer text, recommendations, and retrieved sources."""
 
-    hits = search(question)
+    logger.info("普通 Agent 开始处理问题：%s", question)
+    tool_result = run_rag_search(query=question, k=settings.retrieval_k)
+    hits = tool_result.hits
+    logger.info("普通 Agent 检索完成：hits=%s", len(hits))
+
+    if not hits and (
+        tool_result.observation.startswith("知识库目录不存在")
+        or tool_result.observation.startswith("知识库检索失败")
+    ):
+        logger.warning("普通 Agent 无法完成检索：%s", tool_result.observation)
+        return {
+            "answer": tool_result.observation,
+            "recommendations": recommendations(question),
+            "sources": [],
+        }
+
     text = llm_answer(question, hits) or fallback_answer(question, hits)
+    logger.info("普通 Agent 完成回答：answer_chars=%s", len(text))
 
     return {
         "answer": text,
@@ -51,6 +71,7 @@ def llm_answer(question: str, hits: list[SearchHit]) -> str | None:
     """Use Tongyi only when DASHSCOPE_API_KEY is configured."""
 
     if not os.getenv("DASHSCOPE_API_KEY"):
+        logger.info("普通 Agent 未配置 DASHSCOPE_API_KEY，使用检索兜底回答")
         return None
 
     try:
@@ -71,8 +92,10 @@ def llm_answer(question: str, hits: list[SearchHit]) -> str | None:
 用户问题：{question}
 """
         response = ChatTongyi(model=settings.llm_model, temperature=0.2).invoke(prompt)
+        logger.info("普通 Agent 调用通义模型成功：model=%s", settings.llm_model)
         return response.content.strip() if isinstance(response.content, str) else str(response.content).strip()
     except Exception:
+        logger.exception("普通 Agent 调用通义模型失败，使用检索兜底回答")
         return None
 
 
