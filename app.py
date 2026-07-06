@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.agent.deep.service import deep_answer
-from src.agent.service import answer as normal_answer
+from src.agent.normal.service import answer as normal_answer
 from src.rag.embeddings import ingest, search
 
 

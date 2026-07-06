@@ -39,6 +39,7 @@ class Settings:
     chroma_dir: Path = env_path("CHROMA_DIR", ROOT_DIR / "data" / "chroma")
     chroma_collection: str = os.getenv("CHROMA_COLLECTION", "qf_knowledge_base")
     llm_model: str = os.getenv("LLM_MODEL", "qwen-plus")
+    dashscope_api_key: str = os.getenv("DASHSCOPE_API_KEY", "")
     retrieval_k: int = int(os.getenv("RETRIEVAL_K", "5"))
     chunk_size: int = int(os.getenv("CHUNK_SIZE", "500"))
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "50"))

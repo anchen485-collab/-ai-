@@ -1,43 +1,38 @@
 from __future__ import annotations
 
-"""基于 LangChain create_agent 的深度思考 Agent。"""
+"""基于 LangChain create_agent 的普通问答 Agent。"""
 
 import logging
 
 from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
+from langchain_community.chat_models import ChatTongyi
 
-from src.agent.deep.prompts import SYSTEM_PROMPT, build_user_prompt
 from src.agent.langchain_result import (
     AgentResult,
     extract_steps_and_sources,
     last_ai_text,
 )
+from src.agent.normal.prompts import SYSTEM_PROMPT
 from src.tools.rag import get_agent_tools
 
 
 logger = logging.getLogger(__name__)
 
 
-class DeepThinkingAgent:
-    """使用 LangChain create_agent 创建的深度思考 Agent。"""
+class NormalAgent:
+    """使用通义模型和共享 RAG 工具的普通 Agent。"""
 
     def __init__(
         self,
-        api_key: str,
-        base_url: str,
         model: str,
-        max_steps: int = 8,
-        temperature: float = 0.2,
-        timeout: int = 90,
+        api_key: str,
+        max_steps: int = 4,
     ) -> None:
         self.max_steps = max_steps
-        self.model = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
+        self.model = ChatTongyi(
             model=model,
-            temperature=temperature,
-            timeout=timeout,
+            api_key=api_key,
+            temperature=0.2,
         )
         self.agent = create_agent(
             model=self.model,
@@ -46,12 +41,11 @@ class DeepThinkingAgent:
         )
 
     def run(self, question: str) -> AgentResult:
-        """运行 Agent，并把 LangChain 消息整理成前端需要的数据结构。"""
+        """运行普通 Agent，并返回统一结果结构。"""
 
-        logger.info("深度思考 Agent 开始处理问题：%s", question)
+        logger.info("普通 Agent 开始处理问题：%s", question)
         result = self.agent.invoke(
-            {"messages": [{"role": "user", "content": build_user_prompt(question)}]},
-            # create_agent 底层由 LangGraph 驱动；这里用递归上限控制最多循环次数。
+            {"messages": [{"role": "user", "content": question}]},
             config={"recursion_limit": max(6, self.max_steps * 4 + 4)},
         )
 
@@ -60,7 +54,7 @@ class DeepThinkingAgent:
         answer = last_ai_text(messages) or "暂时没有生成有效回答。"
 
         logger.info(
-            "深度思考 Agent 完成：steps=%s, sources=%s",
+            "普通 Agent 完成：steps=%s, sources=%s",
             len(steps),
             len(sources),
         )

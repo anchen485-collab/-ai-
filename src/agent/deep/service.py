@@ -6,7 +6,7 @@ import logging
 from dataclasses import asdict
 
 from src.agent.deep.react_agent import DeepThinkingAgent
-from src.agent.service import recommendations
+from src.agent.normal.service import recommendations
 from src.core.config import settings
 
 
