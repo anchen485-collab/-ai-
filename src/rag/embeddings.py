@@ -1,56 +1,179 @@
 from __future__ import annotations
 
-"""A tiny local Chinese-friendly embedding function for Chroma."""
+# src/rag/embeddings.py
+# 职责：向量库管理 + 入库时的自动向量化
+# 说明：
+# - DashScopeEmbeddings 作为 embedding 函数注入 Chroma，add_documents 时自动向量化
+# - 一个 file_hash 对应一个 collection（持久化目录也按 hash 隔离），知识库内容变更即新建
+# - 不再有"单独的向量化步骤"——调用方只管给 chunks，向量化由 Chroma 内部完成
 
-import hashlib
-import math
-import re
-from typing import Iterable
+"""向量库与向量化：负责加载已有 Chroma 库或用 chunks 新建（新建时自动向量化）。
+
+对外暴露：
+- VectorStoreManager: 向量库管理器，封装 load_or_build
+- SearchHit: 检索命中结构体
+- ingest() / search(): 模块级便捷函数
+"""
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
+
+from langchain_chroma import Chroma
+from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_core.documents import Document
+
+from src.core.config import Settings, settings
+from src.rag.documents import DocxIngestor
 
 
-class HashingChineseEmbedding:
-    """Hash Chinese characters and n-grams into a normalized vector.
+# =============================================================================
+# 数据结构
+# =============================================================================
 
-    This keeps the first version simple: no model download, no GPU, no API key.
+@dataclass(frozen=True)
+class SearchHit:
+    """对外暴露的检索命中结构：文本 + 来源文件 + 片段序号 + 距离分数（越小越相似）。"""
+    text: str
+    source: str
+    chunk: int
+    distance: float | None = None
+
+
+# =============================================================================
+# 向量库管理器
+# =============================================================================
+
+class VectorStoreManager:
+    """向量库管理器：负责加载已有库或新建并向量化入库。
+
+    典型用法：
+        manager = VectorStoreManager(config, embeddings)
+        store = manager.load_or_build(file_hash, chunks)
+        # store 已经包含向量化后的数据，可直接 similarity_search
     """
 
-    def __init__(self, dimensions: int = 768) -> None:
-        self.dimensions = dimensions
+    def __init__(self, config: Settings, embeddings: DashScopeEmbeddings) -> None:
+        """
+        :param config: 全局配置（包含 chroma_dir）
+        :param embeddings: Embedding 模型实例（已绑定 DASHSCOPE_API_KEY）
+        """
+        self.__config = config
+        self._embeddings = embeddings
 
-    @staticmethod
-    def name() -> str:
-        return "qf_hashing_chinese_embedding"
+    def load_or_build(
+        self,
+        file_hash: str,
+        chunks: Optional[List[Document]] = None,
+    ) -> Chroma:
+        """
+        加载已有向量库；不存在时用 chunks 新建（add_documents 时自动向量化）
+        :param file_hash: 知识库内容哈希，决定 collection 名与持久化目录（不同 hash 互不影响）
+        :param chunks: 切分后的 Document 列表（新建时必须提供；已有数据时忽略）
+        :return: Chroma 向量库实例
+        """
+        persist_dir = os.path.join(str(self.__config.chroma_dir), f"kb_{file_hash}")
+        collection_name = f"kb_{file_hash}"
 
-    @staticmethod
-    def build_from_config(config: dict) -> "HashingChineseEmbedding":
-        return HashingChineseEmbedding(dimensions=int(config.get("dimensions", 768)))
+        # 传入 embedding_function：Chroma 在 add_documents / similarity_search 时自动调用
+        store = Chroma(
+            collection_name=collection_name,
+            embedding_function=self._embeddings,
+            persist_directory=persist_dir,
+            collection_metadata={"hnsw:space": "cosine"},  # 余弦相似度
+        )
 
-    def get_config(self) -> dict:
-        return {"dimensions": self.dimensions}
+        # 已有数据则直接复用，避免重复向量化
+        if store._collection.count() > 0:
+            return store
 
-    def default_space(self) -> str:
-        return "cosine"
+        # 库为空且未提供 chunks：无法建库
+        if not chunks:
+            raise ValueError("向量库不存在且未提供 chunks，无法建库")
 
-    def __call__(self, input: Iterable[str]) -> list[list[float]]:
-        return [self.embed(text) for text in input]
+        # add_documents 时 Chroma 内部自动调用 embedding_function 完成向量化
+        store.add_documents(
+            documents=chunks,
+            ids=[f"id-{idx}" for idx in range(1, len(chunks) + 1)],
+        )
+        return store
 
-    def embed(self, text: str) -> list[float]:
-        vector = [0.0] * self.dimensions
 
-        for token in self.tokens(text):
-            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-            index = int.from_bytes(digest[:4], "little") % self.dimensions
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vector[index] += sign
+# =============================================================================
+# 模块级便捷函数：屏蔽 VectorStoreManager 与 DocxIngestor 的协作细节
+# =============================================================================
 
-        norm = math.sqrt(sum(value * value for value in vector))
-        return vector if norm == 0 else [value / norm for value in vector]
+_default_manager: Optional[VectorStoreManager] = None
 
-    def tokens(self, text: str) -> list[str]:
-        text = re.sub(r"\s+", "", (text or "").lower())
-        tokens = re.findall(r"[a-z0-9_]{2,}", text)
-        tokens.extend(re.findall(r"[\u4e00-\u9fff]", text))
 
-        for size in (2, 3, 4):
-            tokens.extend(text[i : i + size] for i in range(max(0, len(text) - size + 1)))
-        return tokens
+def _manager() -> VectorStoreManager:
+    """惰性单例：避免导入时立刻创建 Chroma 客户端。"""
+    global _default_manager
+    if _default_manager is None:
+        _default_manager = VectorStoreManager(settings, DashScopeEmbeddings())
+    return _default_manager
+
+
+def _ensure_store() -> Chroma:
+    """加载或构建当前 kb_hash 对应的向量库。
+
+    策略：先尝试用 None 复用已有库；不存在时才加载 docx 并切分。
+    这样知识库未变更时不会重复做 IO / 切分。
+    """
+    ingestor = DocxIngestor(settings)
+    file_hash = ingestor.kb_hash()
+    manager = _manager()
+    try:
+        # 已有数据：直接复用
+        return manager.load_or_build(file_hash, None)
+    except ValueError:
+        # 库不存在：加载并切分 docx，新建 collection（add_documents 时自动向量化）
+        chunks = ingestor.ingest()
+        return manager.load_or_build(file_hash, chunks)
+
+
+def ingest() -> dict:
+    """
+    知识库入库：按当前目录内容哈希决定复用还是新建。
+    - kb_hash 未变 → 直接复用已有 collection
+    - kb_hash 变化 → 切分 docx，新建 collection 并自动向量化
+    """
+    store = _ensure_store()
+    return {
+        "collection": store._collection.name,
+        "chunks": store._collection.count(),
+        "path": str(store._persist_directory),
+    }
+
+
+def ingest_new() -> dict:
+    """
+    增量入库：在新模型下与 ingest() 等价。
+    kb_hash 不变则复用，变化则新建，无需单独的增量逻辑。
+    """
+    return ingest()
+
+
+def search(query: str, k: int | None = None) -> list[SearchHit]:
+    """
+    检索最相关的 k 个 chunk；库为空时通过 _ensure_store 自动触发首次构建。
+    :return: 命中列表，按相似度从高到低
+    """
+    store = _ensure_store()
+    # similarity_search_with_score 返回 (Document, distance) 元组列表
+    results = store.similarity_search_with_score(
+        query, k=k or settings.retrieval_k
+    )
+    hits: list[SearchHit] = []
+    for doc, score in results:
+        source_path = doc.metadata.get("source_path", "")
+        hits.append(
+            SearchHit(
+                text=doc.page_content,
+                source=Path(source_path).name if source_path else "未知来源",
+                chunk=int(doc.metadata.get("chunk", 0) or 0),
+                distance=float(score),
+            )
+        )
+    return hits

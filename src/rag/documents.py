@@ -1,101 +1,94 @@
 from __future__ import annotations
 
-"""Load docx knowledge files and split them into searchable chunks."""
+# src/rag/documents.py
+# 职责：Word(docx) 文档加载 + 切分成文本块（chunks）
+# 说明：
+# - 切分粒度决定检索召回质量（太粗则噪音多，太细则丢失上下文）
+# - chunk_overlap 可以减少边界信息丢失（如跨段句子被切断）
+# - 中文场景优先按句号、感叹号等标点切分，避免切断完整句子
 
-import html
-import re
-from dataclasses import dataclass
+"""Word(docx) 知识库加载与切分：把知识库 docx 转成可向量化的 chunks。"""
+
+import hashlib
 from pathlib import Path
-from zipfile import ZipFile
+from typing import List
 
-from src.core.config import settings
+from langchain_community.document_loaders import Docx2txtLoader
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-
-@dataclass(frozen=True)
-class Chunk:
-    id: str
-    text: str
-    metadata: dict[str, str | int]
+from src.core.config import Settings
 
 
-def extract_docx_text(path: Path) -> str:
-    """Extract readable text from a docx file without extra parser packages."""
+class DocxIngestor:
+    """docx 文档加载与切分器。"""
 
-    with ZipFile(path) as archive:
-        xml = archive.read("word/document.xml").decode("utf-8")
+    def __init__(self, config: Settings) -> None:
+        self.__config = config
 
-    paragraphs = re.findall(r"<w:p[\s\S]*?</w:p>", xml)
-    lines: list[str] = []
-    for paragraph in paragraphs:
-        texts = re.findall(r"<w:t[^>]*>(.*?)</w:t>", paragraph)
-        line = "".join(html.unescape(item) for item in texts).strip()
-        if line:
-            lines.append(line)
+    def kb_hash(self, source_dir: Path | None = None) -> str:
+        """
+        计算知识库目录下所有 docx 的联合 MD5 哈希。
+        任一文件新增/删除/修改/重命名 → 哈希变化 → 触发新建 collection。
+        """
+        root = source_dir or self.__config.kb_source_dir
+        if not root.exists():
+            raise FileNotFoundError(f"知识库目录不存在: {root}")
+        h = hashlib.md5()
+        # sorted 保证文件遍历顺序稳定，否则同样内容会得到不同哈希
+        for path in sorted(root.glob("*.docx")):
+            # 文件名纳入哈希，避免重命名场景被识别为未变更
+            h.update(path.name.encode("utf-8"))
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+        return h.hexdigest()
 
-    if lines:
-        return "\n".join(lines)
+    def ingest(self, source_dir: Path | None = None) -> List[Document]:
+        """
+        从知识库目录加载所有 docx → 切分 → 返回 chunks
+        :param source_dir: 知识库目录，None 时使用配置中的 kb_source_dir
+        :return: 切分后的 Document 列表，可直接用于向量化
+        """
+        root = source_dir or self.__config.kb_source_dir
+        if not root.exists():
+            raise FileNotFoundError(f"知识库目录不存在: {root}")
 
-    texts = re.findall(r"<w:t[^>]*>(.*?)</w:t>", xml)
-    return "\n".join(html.unescape(item).strip() for item in texts if item.strip())
+        # sorted 保证构建顺序稳定，进而保证后续 chunk ID 可复现
+        documents: List[Document] = []
+        for path in sorted(root.glob("*.docx")):
+            documents.extend(self.load(str(path)))
 
+        # 切分成 chunks
+        return self.split(documents)
 
-def load_documents(source_dir: Path | None = None) -> list[tuple[Path, str]]:
-    """Load every docx file from the configured knowledge-base folder."""
+    def load(self, docx_path: str) -> List[Document]:
+        """
+        加载单个 docx 文件
+        :param docx_path: docx 文件路径
+        :return: Document 列表，每个 Document 包含 page_content 和 metadata（如来源路径）
+        """
+        docs = Docx2txtLoader(docx_path).load()
+        # 标注来源路径，便于后续在回答中溯源
+        for doc in docs:
+            doc.metadata.setdefault("source", docx_path)
+            doc.metadata["source_path"] = docx_path
+        return docs
 
-    root = source_dir or settings.kb_source_dir
-    if not root.exists():
-        raise FileNotFoundError(f"知识库目录不存在: {root}")
-
-    docs: list[tuple[Path, str]] = []
-    for path in sorted(root.glob("*.docx")):
-        text = extract_docx_text(path)
-        if text.strip():
-            docs.append((path, text))
-    return docs
-
-
-def split_text(text: str) -> list[str]:
-    """Split text into overlapping chunks for vector retrieval."""
-
-    size = settings.chunk_size
-    overlap = settings.chunk_overlap
-    parts = [p.strip() for p in re.split(r"(?<=[。！？；\n])", text) if p.strip()]
-
-    chunks: list[str] = []
-    current = ""
-    for part in parts:
-        if len(current) + len(part) <= size:
-            current += part
-            continue
-
-        if current:
-            chunks.append(current)
-        current = (current[-overlap:] + part).strip() if overlap else part
-
-        while len(current) > size:
-            chunks.append(current[:size])
-            current = current[size - overlap :] if overlap else current[size:]
-
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def build_chunks(source_dir: Path | None = None) -> list[Chunk]:
-    """Build Chroma-ready chunks with source metadata."""
-
-    chunks: list[Chunk] = []
-    for doc_index, (path, text) in enumerate(load_documents(source_dir), start=1):
-        for chunk_index, chunk_text in enumerate(split_text(text), start=1):
-            chunks.append(
-                Chunk(
-                    id=f"{path.stem}-{doc_index}-{chunk_index}",
-                    text=chunk_text,
-                    metadata={
-                        "source": path.name,
-                        "source_path": str(path),
-                        "chunk": chunk_index,
-                    },
-                )
-            )
-    return chunks
+    def split(self, docs: List[Document]) -> List[Document]:
+        """
+        将每个文档切分成更小的文本块（chunk）
+        切分策略：
+        - 优先按中文句号、感叹号、问号、分号、逗号等切分
+        - 如果 chunk 仍超过 chunk_size，则递归按空格/换行切分
+        - 保留 chunk_overlap 个字符的重叠，避免语义断裂
+        :param docs: 原始 Document 列表（每个文件至少一个）
+        :return: 切分后的 Document 列表（每个 chunk 一个）
+        """
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.__config.chunk_size,
+            chunk_overlap=self.__config.chunk_overlap,
+            is_separator_regex=True,      # 启用正则分隔符
+            separators=["(?<=。)", "(?<=！)", "(?<=？)", "(?<=；)", "(?<=，)", " ", "\n"],
+        )
+        return splitter.split_documents(docs)

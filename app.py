@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from src.agent.service import answer
-from src.rag.store import ingest, search
+from src.rag.embeddings import ingest, ingest_new, search
 
 
 app = FastAPI(title="全发首页 AI 小助手", version="0.1.0")
@@ -49,8 +49,15 @@ def chat(payload: ChatRequest) -> dict:
 
 @app.post("/api/ingest")
 def rebuild_knowledge_base() -> dict:
-    # 手动重建知识库。适合桌面“知识库”目录里的 docx 更新后调用。
-    return ingest(reset=True)
+    # 入库：kb_hash 未变则复用，变化则新建 collection 并向量化。
+    # 调用方不需要再区分全量/增量，hash 比对已经把这事做了。
+    return ingest()
+
+
+@app.post("/api/ingest-new")
+def ingest_new_documents() -> dict:
+    # 与 /api/ingest 等价：新模型下 hash 不变即复用，无需单独的增量逻辑。
+    return ingest_new()
 
 
 @app.get("/api/health")

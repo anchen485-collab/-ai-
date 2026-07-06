@@ -3,4 +3,8 @@ fastapi
 uvicorn
 python-dotenv
 langchain-community
+langchain-core
+langchain-text-splitters
+langchain-chroma
+docx2txt
 dashscope

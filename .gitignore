@@ -6,6 +6,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-data/
+/data/
 logs/
 *.log
+
+# 知识库源文件（docx）：属于运行时数据，不进版本库
+src/rag/data/
