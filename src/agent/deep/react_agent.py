@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-"""ReAct 深度思考 Agent 主循环。"""
+"""基于 LangChain create_agent 的深度思考 Agent。"""
 
+import ast
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
-from src.agent.deep.client import OpenAICompatibleChatClient
-from src.agent.deep.parser import parse_react_output
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+
 from src.agent.deep.prompts import SYSTEM_PROMPT, build_user_prompt
-from src.rag.embeddings import SearchHit
-from src.tools.rag import get_agent_tools, parse_tool_input, serialize_hits
+from src.tools.rag import get_agent_tools
 
 
 logger = logging.getLogger(__name__)
@@ -18,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AgentStep:
-    """记录一轮 ReAct 执行过程，方便前端和命令行展示。"""
+    """记录一次工具调用过程，方便前端展示深度思考轨迹。"""
 
     thought: str
     action: str | None = None
@@ -28,7 +31,7 @@ class AgentStep:
 
 @dataclass(frozen=True)
 class AgentResult:
-    """Agent 最终结果。"""
+    """深度思考 Agent 的最终结果。"""
 
     answer: str
     steps: list[AgentStep]
@@ -36,155 +39,147 @@ class AgentResult:
 
 
 class DeepThinkingAgent:
-    """具备 ReAct 和反思机制的深度思考 Agent。"""
+    """使用 LangChain create_agent 创建的深度思考 Agent。"""
 
     def __init__(
         self,
-        client: OpenAICompatibleChatClient,
+        api_key: str,
+        base_url: str,
+        model: str,
         max_steps: int = 8,
         temperature: float = 0.2,
+        timeout: int = 90,
     ) -> None:
-        self.client = client
         self.max_steps = max_steps
-        self.temperature = temperature
-        # 工具用 LangChain @tool 定义，初始化 Agent 时集中放进工具列表。
-        self.tools = get_agent_tools()
+        self.model = ChatOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            timeout=timeout,
+        )
+        self.agent = create_agent(
+            model=self.model,
+            tools=get_agent_tools(),
+            system_prompt=SYSTEM_PROMPT,
+        )
 
     def run(self, question: str) -> AgentResult:
-        """执行 Thought -> Action -> Observation 循环直到最终答案。"""
+        """运行 Agent，并把 LangChain 消息整理成前端需要的数据结构。"""
 
         logger.info("深度思考 Agent 开始处理问题：%s", question)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(question)},
-        ]
-        steps: list[AgentStep] = []
-        all_hits: list[SearchHit] = []
-        no_progress_count = 0
-        last_fingerprint = ""
+        result = self.agent.invoke(
+            {"messages": [{"role": "user", "content": build_user_prompt(question)}]},
+            # create_agent 底层由 LangGraph 驱动；这里用递归上限控制最多循环次数。
+            config={"recursion_limit": max(6, self.max_steps * 4 + 4)},
+        )
 
-        for step_index in range(1, self.max_steps + 1):
-            logger.info("深度思考 Agent 进入第 %s 步", step_index)
-            response = self.client.chat(messages, temperature=self.temperature)
-            output = response.content
-            parsed = parse_react_output(output)
+        messages = list(result.get("messages", []))
+        steps, sources = _extract_steps_and_sources(messages)
+        answer = _last_ai_text(messages) or "暂时没有生成有效回答。"
 
-            messages.append({"role": "assistant", "content": output})
+        logger.info(
+            "深度思考 Agent 完成：steps=%s, sources=%s",
+            len(steps),
+            len(sources),
+        )
+        return AgentResult(answer=answer, steps=steps, sources=sources)
 
-            if parsed.final_answer:
-                logger.info("深度思考 Agent 生成最终答案：step=%s", step_index)
-                steps.append(AgentStep(thought=parsed.thought))
-                return AgentResult(
-                    answer=parsed.final_answer,
-                    steps=steps,
-                    sources=serialize_hits(_dedupe_hits(all_hits)),
+
+def _extract_steps_and_sources(messages: list[Any]) -> tuple[list[AgentStep], list[dict[str, Any]]]:
+    """从 LangChain 消息中提取工具调用步骤和 RAG 来源。"""
+
+    steps: list[AgentStep] = []
+    sources: list[dict[str, Any]] = []
+    pending_tool_calls: dict[str, int] = {}
+
+    for message in messages:
+        if isinstance(message, AIMessage):
+            thought = _message_text(message)
+            for tool_call in message.tool_calls:
+                step = AgentStep(
+                    thought=thought,
+                    action=str(tool_call.get("name") or ""),
+                    action_input=tool_call.get("args"),
                 )
+                steps.append(step)
+                pending_tool_calls[str(tool_call.get("id") or "")] = len(steps) - 1
+            continue
 
-            if not parsed.action:
-                observation = "输出格式不完整：缺少 Action 或 Final Answer。请按 ReAct 格式继续。"
-                logger.warning("深度思考 Agent 输出格式不完整：step=%s", step_index)
-                steps.append(AgentStep(thought=parsed.thought, observation=observation))
-                messages.append({"role": "user", "content": f"Observation: {observation}"})
-                continue
+        if isinstance(message, ToolMessage):
+            parsed = _parse_tool_payload(message.content)
+            observation = str(parsed.get("observation") or _message_text(message))
+            tool_sources = parsed.get("sources") or []
 
-            logger.info(
-                "深度思考 Agent 准备执行工具：step=%s, action=%s, input=%s",
-                step_index,
-                parsed.action,
-                parsed.action_input,
-            )
-            tool_result = self._run_tool(parsed.action, parsed.action_input)
-            all_hits.extend(_hits_from_sources(tool_result.get("sources", [])))
-            observation = str(tool_result.get("observation") or "")
-            logger.info(
-                "深度思考 Agent 工具返回：step=%s, hits=%s, observation_chars=%s",
-                step_index,
-                len(tool_result.get("sources", [])),
-                len(observation),
-            )
+            if isinstance(tool_sources, list):
+                sources.extend(item for item in tool_sources if isinstance(item, dict))
 
-            fingerprint = _fingerprint_sources(tool_result.get("sources", []))
-            if not tool_result.get("sources") or fingerprint == last_fingerprint:
-                no_progress_count += 1
-            else:
-                no_progress_count = 0
-                last_fingerprint = fingerprint
-
-            if no_progress_count >= 3:
-                logger.warning("深度思考 Agent 连续三次检索无进展，触发反思提示")
-                observation += (
-                    "\n\n反思提示：连续三次检索没有获得新进展。"
-                    "请重新审视用户问题，换检索关键词、调整问题范围，"
-                    "或者承认证据不足并准备最终回答。"
-                )
-                no_progress_count = 0
-
-            steps.append(
-                AgentStep(
-                    thought=parsed.thought,
-                    action=parsed.action,
-                    action_input=parsed.action_input,
+            step_index = pending_tool_calls.get(str(message.tool_call_id or ""))
+            if step_index is not None:
+                old_step = steps[step_index]
+                steps[step_index] = AgentStep(
+                    thought=old_step.thought,
+                    action=old_step.action,
+                    action_input=old_step.action_input,
                     observation=observation,
                 )
-            )
-            messages.append({"role": "user", "content": f"Observation: {observation}\n请继续。"})
 
-        return AgentResult(
-            answer="已达到最大深度思考轮数，但还没有形成可靠结论。建议缩小问题范围，或补充更多背景信息后再试。",
-            steps=steps,
-            sources=serialize_hits(_dedupe_hits(all_hits)),
-        )
-
-    def _run_tool(self, action: str, action_input: Any) -> dict[str, Any]:
-        """从工具列表中找到模型指定的工具并执行。"""
-
-        for agent_tool in self.tools:
-            if agent_tool.name != action:
-                continue
-            return agent_tool.invoke(parse_tool_input(action_input))
-
-        logger.warning("深度思考 Agent 请求了未知工具：%s", action)
-        return {
-            "observation": f"未知工具：{action}。请只使用可用工具。",
-            "sources": [],
-        }
+    return steps, _dedupe_sources(sources)
 
 
-def _fingerprint_sources(sources: list[dict[str, Any]]) -> str:
-    """用来源和片段号判断工具返回是否有新进展。"""
+def _last_ai_text(messages: list[Any]) -> str:
+    """获取最后一条 AI 回复文本。"""
 
-    return "|".join(f"{item.get('source')}:{item.get('chunk')}" for item in sources[:5])
-
-
-def _hits_from_sources(sources: list[dict[str, Any]]) -> list[SearchHit]:
-    """把工具返回的字典来源还原成 SearchHit，复用原有去重和序列化逻辑。"""
-
-    hits: list[SearchHit] = []
-    for item in sources:
-        hits.append(
-            SearchHit(
-                text=str(item.get("text") or ""),
-                source=str(item.get("source") or "未知来源"),
-                chunk=int(item.get("chunk") or 0),
-                distance=(
-                    float(item["distance"])
-                    if item.get("distance") is not None
-                    else None
-                ),
-            )
-        )
-    return hits
+    for message in reversed(messages):
+        if isinstance(message, AIMessage) and not message.tool_calls:
+            return _message_text(message)
+    return ""
 
 
-def _dedupe_hits(hits: list[SearchHit]) -> list[SearchHit]:
-    """去除重复来源片段，避免前端展示太多重复证据。"""
+def _message_text(message: Any) -> str:
+    """兼容 LangChain 可能返回的字符串、列表块和消息对象。"""
+
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part).strip()
+    return str(content).strip()
+
+
+def _parse_tool_payload(content: Any) -> dict[str, Any]:
+    """解析工具返回值；LangChain 有时会把 dict 转成字符串。"""
+
+    if isinstance(content, dict):
+        return content
+
+    text = _message_text(content)
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            value = loader(text)
+        except (ValueError, SyntaxError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value
+
+    return {"observation": text, "sources": []}
+
+
+def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """去除重复来源片段，避免前端展示一堆重复证据。"""
 
     seen: set[tuple[str, int]] = set()
-    unique: list[SearchHit] = []
-    for hit in hits:
-        key = (hit.source, hit.chunk)
+    unique: list[dict[str, Any]] = []
+    for source in sources:
+        key = (str(source.get("source") or ""), int(source.get("chunk") or 0))
         if key in seen:
             continue
         seen.add(key)
-        unique.append(hit)
+        unique.append(source)
     return unique

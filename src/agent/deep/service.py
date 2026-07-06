@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 
-from src.agent.deep.client import OpenAICompatibleChatClient
 from src.agent.deep.react_agent import DeepThinkingAgent
 from src.agent.service import recommendations
 from src.core.config import settings
@@ -19,14 +18,14 @@ def deep_answer(question: str) -> dict:
 
     logger.info("深度思考服务收到问题：%s", question)
     if not settings.openai_compatible_api_key:
-        logger.warning("深度思考模式缺少 OpenAI 兼容 API Key")
+        logger.warning("深度思考模式缺少 API Key")
         return {
             "answer": (
-                "深度思考模式需要先配置 OpenAI 兼容 API Key。\n"
+                "深度思考模式需要先配置 API Key。\n"
                 "请在 .env 中设置 OPENAI_COMPATIBLE_API_KEY，"
-                "如果使用 DeepSeek-R1，建议同时设置 "
+                "如果使用 DeepSeek，建议同时设置 "
                 "OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com "
-                "和 DEEP_AGENT_MODEL=deepseek-reasoner。"
+                "和 DEEP_AGENT_MODEL。"
             ),
             "recommendations": recommendations(question),
             "sources": [],
@@ -41,16 +40,13 @@ def deep_answer(question: str) -> dict:
             "mode": "deep",
         }
 
-    client = OpenAICompatibleChatClient(
+    agent = DeepThinkingAgent(
         api_key=settings.openai_compatible_api_key,
         base_url=settings.openai_compatible_base_url,
         model=settings.deep_agent_model,
-        timeout=settings.deep_agent_timeout,
-    )
-    agent = DeepThinkingAgent(
-        client=client,
         max_steps=settings.deep_agent_max_steps,
         temperature=settings.deep_agent_temperature,
+        timeout=settings.deep_agent_timeout,
     )
 
     try:
@@ -72,7 +68,11 @@ def deep_answer(question: str) -> dict:
             "mode": "deep",
         }
 
-    logger.info("深度思考服务完成回答：steps=%s, sources=%s", len(result.steps), len(result.sources))
+    logger.info(
+        "深度思考服务完成回答：steps=%s, sources=%s",
+        len(result.steps),
+        len(result.sources),
+    )
     return {
         "answer": result.answer,
         "recommendations": recommendations(question),

@@ -15,12 +15,16 @@ from __future__ import annotations
 - ingest() / search(): 模块级便捷函数
 """
 
+import logging
 import os
 import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+logging.getLogger("chromadb.telemetry.product.posthog").disabled = True
 
 if "onnxruntime" not in sys.modules:
     # Chroma 导入时会初始化默认 ONNX embedding，但本项目实际使用 DashScopeEmbeddings。

@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-"""RAG 检索工具。
-
-这一层是给 Agent 使用的“工具接口”，底层复用 src.rag.embeddings 中的
-Chroma 检索能力。这样普通 Agent 和深度思考 Agent 都能调用同一套工具。
-"""
+"""普通 Agent 和深度思考 Agent 共用的 RAG 工具。"""
 
 import logging
 from dataclasses import asdict, dataclass
@@ -20,14 +16,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ToolResult:
-    """工具执行结果。"""
+    """工具执行结果，供普通 Agent 和 LangChain 工具复用。"""
 
     observation: str
     hits: list[SearchHit]
 
 
 def run_rag_search(query: str, k: int = 5) -> ToolResult:
-    """执行知识库检索，返回内部 Agent 更容易使用的结构。"""
+    """执行知识库检索，返回内部更容易使用的结构。"""
 
     query = str(query or "").strip()
     k = max(1, min(int(k or 5), 10))
@@ -75,23 +71,12 @@ def rag_search(query: str, k: int = 5) -> dict[str, Any]:
 
 
 def get_agent_tools() -> list[Any]:
-    """返回 Agent 可用工具列表，初始化 Agent 时直接传入。"""
+    """返回 Agent 可用工具列表，初始化 LangChain Agent 时直接传入。"""
 
     return [rag_search]
 
 
 def serialize_hits(hits: list[SearchHit]) -> list[dict[str, Any]]:
-    """把检索结果转成接口可返回的字典。"""
+    """把检索结果转换成接口可返回的字典。"""
 
     return [asdict(hit) for hit in hits]
-
-
-def parse_tool_input(action_input: Any) -> dict[str, Any]:
-    """兼容模型输出的 JSON、字符串等 Action Input。"""
-
-    if isinstance(action_input, dict):
-        query = str(action_input.get("query") or "").strip()
-        k = int(action_input.get("k") or 5)
-        return {"query": query, "k": max(1, min(k, 10))}
-
-    return {"query": str(action_input or "").strip(), "k": 5}
