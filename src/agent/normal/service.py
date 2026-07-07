@@ -8,7 +8,7 @@ from dataclasses import asdict
 
 from src.agent.normal.react_agent import NormalAgent
 from src.core.config import settings
-from src.rag.embeddings import SearchHit
+from src.rag.search import SearchHit
 from src.tools.rag import run_rag_search
 
 

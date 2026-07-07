@@ -11,16 +11,14 @@ from __future__ import annotations
 
 对外暴露：
 - VectorStoreManager: 向量库管理器，封装 load_or_build
-- SearchHit: 检索命中结构体
-- ingest() / search(): 模块级便捷函数
+- _ensure_store(): 获取或初始化 Chroma 向量库
+- ingest(): 入库触发函数
 """
 
 import logging
 import os
 import sys
 import types
-from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Optional
 
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
@@ -41,19 +39,6 @@ from chromadb.config import Settings as ChromaSettings
 
 from src.core.config import Settings, settings
 from src.rag.documents import DocxIngestor
-
-
-# =============================================================================
-# 数据结构
-# =============================================================================
-
-@dataclass(frozen=True)
-class SearchHit:
-    """对外暴露的检索命中结构：文本 + 来源文件 + 片段序号 + 距离分数（越小越相似）。"""
-    text: str
-    source: str
-    chunk: int
-    distance: float | None = None
 
 
 # =============================================================================
@@ -171,25 +156,3 @@ def ingest_new() -> dict:
     return ingest()
 
 
-def search(query: str, k: int | None = None) -> list[SearchHit]:
-    """
-    检索最相关的 k 个 chunk；库为空时通过 _ensure_store 自动触发首次构建。
-    :return: 命中列表，按相似度从高到低
-    """
-    store = _ensure_store()
-    # similarity_search_with_score 返回 (Document, distance) 元组列表
-    results = store.similarity_search_with_score(
-        query, k=k or settings.retrieval_k
-    )
-    hits: list[SearchHit] = []
-    for doc, score in results:
-        source_path = doc.metadata.get("source_path", "")
-        hits.append(
-            SearchHit(
-                text=doc.page_content,
-                source=Path(source_path).name if source_path else "未知来源",
-                chunk=int(doc.metadata.get("chunk", 0) or 0),
-                distance=float(score),
-            )
-        )
-    return hits

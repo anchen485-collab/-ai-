@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from src.rag.embeddings import SearchHit, search
+from src.rag.search import SearchHit, search
 
 
 logger = logging.getLogger(__name__)
