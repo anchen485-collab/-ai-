@@ -35,10 +35,10 @@ if "onnxruntime" not in sys.modules:
 from langchain_chroma import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
-from chromadb.config import Settings as ChromaSettings
 
 from src.core.config import Settings, settings
 from src.rag.documents import DocxIngestor
+from src.rag.engine import build_chroma
 
 
 # =============================================================================
@@ -76,14 +76,7 @@ class VectorStoreManager:
         persist_dir = os.path.join(str(self.__config.chroma_dir), f"kb_{file_hash}")
         collection_name = f"kb_{file_hash}"
 
-        # 传入 embedding_function：Chroma 在 add_documents / similarity_search 时自动调用
-        store = Chroma(
-            collection_name=collection_name,
-            embedding_function=self._embeddings,
-            persist_directory=persist_dir,
-            client_settings=ChromaSettings(anonymized_telemetry=False),
-            collection_metadata={"hnsw:space": "cosine"},  # 余弦相似度
-        )
+        store = build_chroma(collection_name, persist_dir, embedding_function=self._embeddings)
 
         # 已有数据则直接复用，避免重复向量化
         if store._collection.count() > 0:

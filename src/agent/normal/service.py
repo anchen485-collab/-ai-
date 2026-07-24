@@ -7,7 +7,8 @@ import re
 from dataclasses import asdict
 
 from src.agent.normal.react_agent import NormalAgent
-from src.core.config import settings
+from src.core.config import ModelConfig, settings
+from src.memory.service import build_context, save_turn
 from src.rag.search import SearchHit
 from src.tools.rag import run_rag_search
 
@@ -49,24 +50,42 @@ CHANNEL_RULES = [
 ]
 
 
-def answer(question: str) -> dict:
+def answer(
+    question: str,
+    model_config: ModelConfig | None = None,
+    conversation_id: str | None = None,
+    attachment_context: str = "",
+    image_urls: list[str] | None = None,
+) -> dict:
     """运行普通 Agent，并返回前端需要的响应结构。"""
 
-    logger.info("普通问答服务收到问题：%s", question)
-    if not settings.dashscope_api_key:
-        logger.warning("普通 Agent 缺少 DASHSCOPE_API_KEY，使用 RAG 兜底回答")
-        return _fallback_response(question)
+    config = model_config or settings.model_config(settings.default_model)
+    model_name = config.name
+    logger.info("普通问答服务收到问题：model=%s, question=%s, conversation_id=%s", model_name, question, conversation_id)
+
+    # 短期记忆：加载上下文
+    cid, context_messages = build_context(conversation_id)
+
+    if not config.api_key:
+        logger.warning("普通 Agent 缺少模型 API Key，使用 RAG 兜底回答")
+        return _fallback_response(question, model_name, conversation_id=cid)
 
     agent = NormalAgent(
-        model=settings.llm_model,
-        api_key=settings.dashscope_api_key,
+        model=model_name,
+        api_key=config.api_key,
+        base_url=config.base_url,
     )
 
     try:
-        result = agent.run(question)
+        result = agent.run(
+            question,
+            context_messages=context_messages if context_messages else None,
+            attachment_context=attachment_context,
+            image_urls=image_urls,
+        )
     except Exception as exc:
         logger.exception("普通 Agent 运行失败，使用 RAG 兜底回答")
-        fallback = _fallback_response(question)
+        fallback = _fallback_response(question, model_name, conversation_id=cid)
         fallback["steps"] = [
             {
                 "thought": "普通 Agent 调用模型或工具时出现异常，已切换到 RAG 兜底。",
@@ -77,12 +96,17 @@ def answer(question: str) -> dict:
         ]
         return fallback
 
+    # 保存本轮对话，附件上下文一并存入，确保图片分析细节在后续轮次中可见
+    save_turn(cid, question, result.answer, attachment_context)
+
     return {
         "answer": result.answer,
         "recommendations": recommendations(question),
         "sources": result.sources,
         "steps": [asdict(step) for step in result.steps],
         "mode": "normal",
+        "model": model_name,
+        "conversation_id": cid,
     }
 
 
@@ -97,7 +121,7 @@ def recommendations(question: str) -> list[dict[str, str]]:
     return matched[:3]
 
 
-def _fallback_response(question: str) -> dict:
+def _fallback_response(question: str, model: str | None = None, conversation_id: str = "") -> dict:
     """没有模型或模型失败时，直接展示 RAG 检索证据。"""
 
     tool_result = run_rag_search(query=question, k=settings.retrieval_k)
@@ -125,6 +149,8 @@ def _fallback_response(question: str) -> dict:
             }
         ],
         "mode": "normal",
+        "model": model or settings.llm_model,
+        "conversation_id": conversation_id,
     }
 
 

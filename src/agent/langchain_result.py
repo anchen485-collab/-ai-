@@ -114,6 +114,12 @@ def parse_tool_payload(content: Any) -> dict[str, Any]:
     return {"observation": text, "sources": []}
 
 
+def extract_sources_from_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    """仅从完整消息列表中提取去重后的来源，供流式完成后使用。"""
+    _, sources = extract_steps_and_sources(messages)
+    return sources
+
+
 def dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """去除重复来源片段，避免前端展示重复证据。"""
 

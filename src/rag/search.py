@@ -57,6 +57,12 @@ class SearchHit:
     rerank_score: float | None = None
 
 
+def serialize_hits(hits: list[SearchHit]) -> list[dict[str, Any]]:
+    """将检索结果转为可序列化的字典列表。"""
+    from dataclasses import asdict
+    return [asdict(hit) for hit in hits]
+
+
 def search(query: str, k: int | None = None) -> list[SearchHit]:
     """MMR 粗召回 → rerank 精排 → 阈值过滤 → 返回 top-K。"""
     k = k or settings.retrieval_k
